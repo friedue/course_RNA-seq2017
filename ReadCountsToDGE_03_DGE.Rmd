@@ -1,0 +1,403 @@
+---
+title: "Read Counts to DGE, Part III"
+author: "Friederike Duendar, ABC"
+date: "September 7, 2015"
+output: pdf_document
+---
+
+
+
+```{r settingUp, warning=FALSE, echo=FALSE, message=FALSE}
+library(knitr)
+opts_chunk$set(echo = FALSE, message = FALSE,cache=TRUE)
+library(DESeq2)
+library(magrittr)
+load("ReadCountsToDGE.RData")
+```
+
+We need to ensure that the fold change will be calculated using the WT as the base line.
+`DESeq` used the levels of the condition to determine the order of the comparison.
+
+```{r DESeqPrep_relevel}
+str(DESeq.ds$condition)
+DESeq.ds$condition <- relevel(DESeq.ds$condition, ref="WT")
+str(DESeq.ds$condition)
+```
+
+#### Brief excursion: paired analysis design
+
+```{r eval = FALSE,}
+# for paired experimental designs, an additive model is recommended
+# rather than an interaction term which would be indicated using a ":"
+￼design(dds) <- formula(~ patient + tissue) # last variable will automatically be used for the contrast later on
+```
+
+Running the analysis.
+
+```{r}
+DESeq.ds <- DESeq(DESeq.ds)
+
+# DESeq() is the same as running:
+DESeq.ds <- estimateSizeFactors(DESeq.ds) # sequencing depth normalization between the samples
+DESeq.ds <- estimateDispersions(DESeq.ds) # gene-wise dispersion estimates across all samples
+DESeq.ds <- nbinomWaldTest(DESeq.ds) # this fits a negative binomial GLM and applies Wald statistics to each gene
+```
+
+Extract the base means across samples, log2 fold changes, standard errors, 
+test statistics, p-values and adjusted p-values for every gene using `results()`.
+
+```{r}
+DESeq.ds <- DESeq(DESeq.ds)
+DGE.results <- results(DESeq.ds,
+                       independentFiltering = TRUE,
+                       alpha = 0.05)
+str(DGE.results)
+head(DGE.results)
+summary(DGE.results)
+
+# the DESeqResult object can basically be handled like a data.frame
+head(DGE.results)
+table(DGE.results$padj < 0.05)
+```
+NAs in the padj column (but values in both log2FC and pvalue) are indicative of that gene being filtered out by the independent filtering [because it was very lowly expressed].
+
+The __MA-plot__ provides a global view of the differential genes, with the log2 fold
+change on the y-axis over the mean of normalized counts.
+
+Genes that pass the significance threshold (adjusted p.value \textless 0.05) are colored in red.
+
+```{r MAplots}
+par(mfrow=c(1,2))
+plotMA(DGE.results, alpha = 0.05, 
+       main = "Test: p.adj.value < 0.05", ylim = c(-4,4))
+```
+
+A adj. p-value histogram:
+
+```{r adjpvalueHistogram}
+par(mfrow=c(1,2))
+hist(DGE.results$padj, 
+     col="grey", border="white", xlab="", ylab="", main="frequencies of adj. p-values\n(all genes)")
+```
+
+A sorted results table:
+
+```{r}
+DGE.results.sorted <- DGE.results[order(DGE.results$padj),]
+head(DGE.results.sorted)
+```
+
+Plotting counts for single genes (seq. depth normalized, log2-transformed)
+
+```{r singleGenePlot}
+par(mfrow=c(1,2))
+plotCounts(DESeq.ds, gene="YAL056W", normalized = TRUE)  
+plotCounts(DESeq.ds, gene=which.max(DGE.results$padj), main = "Max. p.adj.")
+```
+
+`plotCounts` simply uses `counts(dds, normalized = TRUE) + 0.5`.
+
+You can also use `pcaExplorer` for individual gene plots of `rlog` values.
+
+A heatmap of the genes that show differential expression with adjusted p-value \textless 0.05 :
+
+```{r heatmaps}
+# identify genes with the desired adjusted p-value cut-off
+DGEgenes <- rownames(subset(DGE.results.sorted, padj < 0.05))
+
+# extract rlog-transformed values into a matrix
+hm.mat_DGEgenes <- rlog.norm.counts[DGEgenes,]
+
+library(NMF)
+par(mfrow=c(1,2))
+# heatmap of DEG sorted by p.adjust
+aheatmap(hm.mat_DGEgenes, scale="none", Rowv = NA, Colv = NA)
+aheatmap(hm.mat_DGEgenes, scale="row", Rowv = NA, Colv = NA)
+
+# combine the heatmap with hierarchical clustering (Euclidean distance, average linkage)
+aheatmap(head(hm.mat_DGEgenes,50), scale="none",
+         Rowv = TRUE, Colv = TRUE,
+         distfun = "euclidean", hclustfun = "average",
+         main = "top 50 DEG (p.adjust)")
+aheatmap(head(hm.mat_DGEgenes,50), scale="row",
+         Rowv = TRUE, Colv = TRUE,
+         distfun = "euclidean", hclustfun = "average",
+         main = "top 50 DEG ((p.adjust))")
+```
+
+
+## Number 1 sanity check: is SNF2 affected in the SNF2 mutant yeast samples?
+
+To find this out, we need to retrieve the gene names and match them to the ORF 
+IDs that we've used so far.
+[http://www.bioconductor.org/packages/3.1/data/annotation/](http://www.bioconductor.org/packages/3.1/data/annotation/)
+lists annotation packages that are available within R through bioconductor.
+
+We will go with `org.Sc.sgd.db`.
+
+```{r checkForSNF2}
+#source("http://bioconductor.org/biocLite.R")
+#biocLite("org.Sc.sgd.db")
+library(org.Sc.sgd.db) # org.Hs.eg.db, org.Mm.eg.db
+
+# list keytypes that are available to query the annotation data base
+keytypes(org.Sc.sgd.db)
+
+# list columns that can be retrieved from the annotation data base
+columns(org.Sc.sgd.db)
+
+# make a batch retrieval for all DE genes
+DGEgenes <- rownames(subset(DGE.results.sorted, padj < 0.05))
+
+anno.DGE <- select(org.Sc.sgd.db,
+               keys = DGEgenes, # rownames
+               keytype="ORF", # our rownames are ORF identifiers
+               columns=c("SGD","GENENAME")) # what to return
+
+# check whether SNF2 pops up among the top downregulated genes
+#head(anno.DGE[match(DGEgenes, anno.DGE$ORF),])
+head(anno.DGE)
+
+```
+
+To get a feeling for how the difference between WT and snf2 ko looks like for a
+housekeeping gene, let's repeat the exercise.
+
+```{r singleGenePlot_noDGE, echo = FALSE}
+# retrieve annotation for all genes
+anno.all <- select(org.Sc.sgd.db,
+               keys = rownames(DGE.results.sorted), keytype="ORF",
+               columns=c("SGD","GENENAME","ENTREZID","ENSEMBL"))
+# get actin ORF ID
+orf.actin <- anno.all$ORF[which(grepl("ACT", anno.all$GENENAME))]
+# plot
+library(grDevices) # for italicizing gene name
+par(mfrow=c(1,2))
+plotCounts(dds = DESeq.ds,
+           gene = "YOR290C",
+           normalized = TRUE, transform = FALSE,
+           main = expression(atop("Expression of "*italic("snf2"), "(YOR290C)")))
+#substitute(paste("Expression of ", italic("snf2"),"(YOR290C)")))
+plotCounts(dds = DESeq.ds,
+           gene = orf.actin,
+           transform = FALSE, normalized = TRUE,
+           main = expression(atop("Expression of "*italic("actin"), "(YFL039C)")))
+# expression(atop("Expression of "*italic("actin"), b), list(b=orf.actin) ) )
+
+```
+
+Export the log2FC, p-values etc. into a text file:
+
+```{r, eval=FALSE}
+out.df <- merge(as.data.frame(DGE.results), anno, by.x = "row.names", by.y = "ORF")
+
+# this will return all values for all genes
+write.table(out.df, file = "DESeq2results_WT-vs-SNF2.txt", sep = "\t", 
+            quote = FALSE, row.names = FALSE)
+```
+
+How can you export only those with an adjusted p-value \textless 0.05?
+
+```{r echo=FALSE, eval=FALSE}
+write.table(subset(out.df, padj < 0.05), file = "DESeq2results_WT-vs-SNF2.txt",
+            sep = "\t", quote = FALSE, row.names = FALSE)
+```
+
+## GO term enrichment
+
+Couldn't get it to work with yeast yet.
+
+```{r goseq_yeast, eval = FALSE}
+# extract Entrez IDs for the genes of interest
+##DGEgenes.entrez <- subset(anno.all, ORF %in% DGEgenes, select = "ENTREZID")[,1] 
+##limma::goana(DGEgenes.entrez, geneid = DGEgenes.entrez)
+#DGEgenes.GO <- select(org.Sc.sgd.db, keys = DGEgenes, keytype = "ORF", columns = c("ORF", "GENENAME", "GO"))
+```
+
+Manual work-around for mouse:
+
+```{r goseq_mm, eval = FALSE}
+#biocLite("org.Mm.eg.db")
+#biocLite("goseq")
+#biocLite("biomaRt")
+library(biomaRt)
+library(org.Mm.eg.db)
+library(goseq)
+library(geneLenDataBase)
+
+# gene list from http://amp.pharm.mssm.edu/Enrichr/#
+# saved as genesGOtest.txt
+gns <- read.table("genesGOtest.txt", stringsAsFactors = FALSE)
+# retrieve the ENSEMBL symbols for the gene names
+anno.mm <- select(org.Mm.eg.db,
+               keys = gns$V1, 
+               keytype="SYMBOL", # our rownames are ORF identifiers
+               columns=c("ENSEMBL","SYMBOL","GENENAME")) # what to return
+
+# in addition, retrieve all possible mouse gene names
+# because goseq wants to know about the universe of all genes
+mart <- useMart(biomart = "ensembl", dataset = "mmusculus_gene_ensembl")
+mm_all <- getBM(attributes = c("ensembl_gene_id"),  mart = mart)
+
+# get length data using goseq's data base of gene lengths
+# first, load the data from the geneLenDataBase package
+data(list = "mm9.ensGene.LENGTH", package = "geneLenDataBase")
+
+# split the length values per ENSEMBL ID
+len_data = split(get("mm9.ensGene.LENGTH")$Length, 
+            get("mm9.ensGene.LENGTH")$Gene)
+
+# get the gene names from the length data base
+gn_names = get("mm9.ensGene.LENGTH")$Gene
+
+# calculate the median (and other) lengths for the 
+# different transcripts
+len = data.frame(Gene = names(len_data), 
+                 Median = sapply(len_data,median), 
+                 Min = sapply(len_data, min),
+                 Max = sapply(len_data, max),
+                 Count = sapply(len_data, length))
+
+# goseq wants a named binary vector where 1 represents DE, 0 not DE and the names are gene IDs.
+gogns <- as.integer(len$Gene %in% anno.mm$ENSEMBL)
+names(gogns) <- len$Gene
+
+# weighting for each gene, depending on its length, given by the PW
+# Probability Weighting Function (PWF)
+# proportion of DE genes is plotted as a function of the transcript length
+pwf = goseq::nullp(gogns, bias.data = len$Median) # probably looks bad because the genes weren't taken from a DE set, but from ChIP-seq, I think
+
+GO.wall=goseq(pwf, "mm9", "ensGene")
+
+# can be summarized in http://revigo.irb.hr/
+write.table(subset(GO.wall, over_represented_pvalue < 0.05, select = c("category","over_represented_pvalue")), "GOterms.txt", quote =FALSE, row.names = FALSE, col.names = FALSE)
+```
+
+### EdgeR
+
+```{r running_edger}
+library(edgeR)
+sample_info.edger <- factor(c( rep("SNF2", 5), rep("WT", 5)))
+sample_info.edger <- relevel(sample_info.edger, ref = "WT")
+edgeR.DGElist <- DGEList(counts = readcounts,	group = sample_info.edger)
+
+keep <- rowSums( cpm(edgeR.DGElist) >= 1) >= 5
+edgeR.DGElist <- edgeR.DGElist[keep,]
+head(edgeR.DGElist$samples)
+ 
+edgeR.DGElist <- calcNormFactors(edgeR.DGElist, method = "TMM")
+edgeR.DGElist$samples
+
+design <- model.matrix(~sample_info.edger)
+edgeR.DGElist <- estimateDisp(edgeR.DGElist, design)
+edger_fit <- glmFit(edgeR.DGElist, design)
+edger_lrt <- glmLRT(edger_fit)
+
+DGE.results_edgeR <- topTags(edger_lrt, n = Inf, # to retrieve all genes
+							sort.by = "PValue", adjust.method = "BH")
+```
+
+### Limma-voom
+
+```{r running_limma}
+library(limma)
+rownames(design) <- colnames(edgeR.DGElist)
+voomTransformed <- voom(edgeR.DGElist, design, plot=FALSE)
+voomed.fitted <- lmFit(voomTransformed, design = design)
+voomed.fitted <- eBayes(voomed.fitted)
+DGE.results_limma <- topTable(voomed.fitted, coef = "sample_info.edgerSNF2",
+         number = Inf, adjust.method = "BH",
+         sort.by = "logFC")
+
+```
+
+## Comparing the results of the different DGE tools
+
+
+### How many genes were found in all tools?
+
+__Venn diagram__:
+
+```{r venn_plot, fig.height = 5, fig.width = 5}
+library(gplots)
+DE_list <- list(edger = rownames(subset(DGE.results_edgeR$table, FDR <= 0.05)),
+                deseq2 = rownames(subset(DGE.results, padj <= 0.05)),
+                limma = rownames(subset(DGE.results_limma, adj.P.Val <= 0.05))
+)
+venn(DE_list)
+```
+
+More sophisticated/useful diagram, especially if you are comparing more than 3 lists:
+
+```{r upset_plot}
+library(UpSetR)
+upset(fromList(DE_list), order.by = "freq")
+```
+
+### How well do the logFC agree?
+
+First, we need the genes that are part of all the DE lists.
+
+```{r custom_function}
+# if you want to use the following function, you will have to execute its code
+
+#' Make data.frame of memberships
+#'
+#' @details This function takes as input a list of vectors (e.g., 3 lists of names)
+#' and returns a data.frame that indicates for every unique entry the vector it is
+#' being part of. This is the basis for all venn diagrams.
+#' This function is basically the the same as \code{UpSetR::fromList()}, the only 
+#' difference being that I am adding rownames to the output.
+#'
+#' @param in_list list
+#' @return data.frame where the column names correspond to the names of the vectors
+#' of the list
+#' @examples
+#' listInput <- list(one = c(1, 2, 3, 5, 7, 8, 11, 12, 13),
+#'                  two = c(1, 2, 4, 5, 10),
+#'                  three = c(1, 5, 6, 7, 8, 9, 10, 12, 13))
+#' ups_input <- make_membership_df(listInput)
+make_membership_df <- function(in_list){
+  # get a vector of all entries
+  our_universe <- unique(unlist(in_list))
+
+  out_data <- unlist(lapply(in_list, function(x) {
+    x <- as.vector(match(our_universe, x)) # NA will be introduced for every no-match
+  }))
+
+  out_data[is.na(out_data)] <- as.integer(0) # mark every non-match with a zero
+  out_data[out_data != 0] <- as.integer(1) # every match gets a one
+  # get the correct shape of the data.frame
+  out_data <- matrix(out_data, ncol = length(in_list), byrow = F)
+  out_data <- out_data[which(rowSums(out_data) != 0), ]
+  out_data <- as.data.frame(out_data)
+  names(out_data) <- names(in_list)
+  row.names(out_data) <- our_universe
+  return(out_data)
+}
+```
+
+```{r eval=TRUE}
+DE_gns_all <- fromList(DE_list)
+rownames(DE_gns_all) <- unique(unlist(DE_list))
+head(DE_gns_all)
+# keep only those genes that were found to be DE in all three tools
+DE_gns_all <- row.names(DE_gns_all[rowSums(DE_gns_all) == 3,])
+DE_fc <- data.frame(edger = DGE.results_edgeR[DE_gns_all,]$table$logFC, 
+                    limma = DGE.results_limma[DE_gns_all,]$logFC,
+                    deseq2 = DGE.results[DE_gns_all,]$log2FoldChange,
+                   row.names = DE_gns_all)
+```
+
+```{r pairs_logFC, fig.width = 6, fig.height = 7}
+pairs(DE_fc)
+```
+
+```{r hm_logFC, fig.width = 4, fig.height = 7}
+NMF::aheatmap(as.matrix(DE_fc) )
+```
+
+
+```{r, echo=FALSE, eval = FALSE}
+save.image(file = "ReadCountsToDGE.RData")
+```

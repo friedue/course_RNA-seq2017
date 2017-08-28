@@ -1,0 +1,290 @@
+---
+title: "Read counts to DGE, Part I"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+This script will show you how to:
+ 
+* Read in `featureCounts` results into R.
+* Use `DESeq2` to:
+  - normalize read counts for sequencing depth
+  - transform reads to the log2 scale
+* Accompany each step by exploratory plots.
+
+```{r settingUp, warning=FALSE, echo=TRUE, message=FALSE}
+library(knitr)
+options(stringsAsFactors = FALSE)
+opts_chunk$set(echo = TRUE, message = FALSE,cache=FALSE)
+library(ggplot2)
+library(magrittr)
+```
+
+After loading the libraries we are going to need, we will start by reading in the `featureCounts` results.
+You can generate an html document out of this entire script by clickling the `Knit HTML` button in RStudio.
+
+First, make sure you set the path to your working directory which should contain the count table.
+
+```{r setWD}
+folder <- "~/Documents/Teaching/2017_RNA-seq/" # download count table!
+setwd(folder)
+```
+
+We will use the `DESeq2` package to normalize the samples for differences in their sequencing depth.
+
+```{r install_bioconductor_pckgs, eval=FALSE}
+# not available via install.packages(), but through bioconductor
+source("http://bioconductor.org/biocLite.R")
+biocLite("DESeq2")
+```
+
+```{r warning=FALSE}
+library(DESeq2)
+```
+
+We will have to generate a `DESeqDataSet`; what is needed can be found out via `?DESeqDataSetFromMatrix`.
+The help indicates that we need two tables, `countData` and `colData`.
+
+* `colData`:  `data.frame` with all the variables you know about your samples, e.g., experimental condition, the type, and date of sequencing and so on. Its row.names should correspond to the unique sample names.
+* `countData`: should contain a matrix of the actual values associated with the genes and samples. Is equivalent to `assay()`. Conveniently, this is almost exactly the format of the `featureCounts` output.
+
+```{r featureCounts, eval=FALSE, echo = TRUE, engine='bash'}
+ # reads for yeast samples counted on the meta-feature level
+subread-1.4.6/bin/featureCounts \
+	-a sacCer3.gtf \
+	-o featCounts_genes.txt \
+	alignment/*bam 
+```
+
+```{r reading_in}
+folder <- "~/Documents/Teaching/2017_RNA-seq/"
+# reading in featureCounts output
+readcounts <- read.table(paste0(folder, "featureCounts_result.txt"),
+                          header=TRUE)
+head(readcounts)
+```
+
+__Preparing the count matrix for DESeq2:__
+
+```{r countMatrix_prep}
+# gene IDs should be stored as row.names
+row.names(readcounts) <- gsub("-", ".", readcounts$Geneid)
+
+# exclude the columns without read counts (columns 1 to 6 contain additional
+# info such as genomic coordinates) 
+readcounts <- readcounts[,-c(1:6)]
+
+# give meaningful sample names - there are many ways to achieve this
+orig_names <- names(readcounts)
+names(readcounts) <- c("SNF2_1", "SNF2_2", "SNF2_3", "SNF2_4", "SNF2_5",
+                        "WT_1", "WT_2", "WT_3", "WT_4", "WT_5" ) # most error-prone way
+
+# alternatives:
+names(readcounts) <- c( paste("SNF2", c(1:5), sep = "_"),
+                        paste("WT", c(1:5), sep = "_") ) # less potential for typos
+names(readcounts) <- gsub(".*(WT|SNF2)(_[0-9]+).*", "\\1\\2", orig_names) # why is this a safer solution?
+```
+
+Always check your data set after you manipulated it!
+
+```{r}
+str(readcounts)
+head(readcounts)
+```
+
+In addition to the read counts, we need some more information about the samples.
+According to `?colData`, this should be a `data.frame`, where the _rows_ directly
+match the _columns_ of the count data.
+
+Here's how this could be generated in `R` matching the `readcounts` data.frame we already have:
+
+```{r making_colData}
+sample_info <- data.frame(condition = gsub("_[0-9]+", "", names(readcounts)),
+                          row.names = names(readcounts) )
+sample_info
+```
+
+Let's generate the `DESeqDataSet`:
+
+```{r DESeqDataSet, warning=FALSE}
+DESeq.ds <- DESeqDataSetFromMatrix(countData = readcounts,
+                              colData = sample_info,
+                              design = ~ condition)
+DESeq.ds
+head(counts(DESeq.ds))
+```
+
+How many reads were counted for each sample ( = library sizes)?
+
+```{r eval=TRUE, echo=TRUE}
+colSums(counts(DESeq.ds))
+```
+
+Remove genes with no reads.
+
+```{r eval = TRUE}
+DESeq.ds <- DESeq.ds[ rowSums(counts(DESeq.ds)) > 0, ]
+counts(DESeq.ds) %>% str
+assay(DESeq.ds) %>% str
+```
+
+Now that we have the data, we can start using `DESeq`'s functions, e.g. `estimateSizeFactors()` for sequencing depth normalization.
+
+```{r sizeFactors}
+DESeq.ds <- estimateSizeFactors(DESeq.ds)
+sizeFactors(DESeq.ds)
+```
+
+```{r eval=TRUE, echo=TRUE}
+plot(sizeFactors(DESeq.ds), colSums(counts(DESeq.ds)))
+```
+
+The read counts normalized for sequencing depth can be accessed via `counts(..., normalized = TRUE)`.
+
+Let's check whether the normalization helped adjust global differences between the samples.
+
+```{r boxplots_untransformed, fig.width = 10, fig.height = 5}
+# setting up the plotting layout
+par(mfrow=c(1,2))
+counts.sf_normalized <- counts(DESeq.ds, normalized=TRUE)
+
+# adding the boxplots
+boxplot(counts.sf_normalized, main = "SF normalized")
+boxplot(counts(DESeq.ds), main = "read counts only")
+```
+
+We can't really see anything. 
+It is usually helpful to *transform* the normalized read counts to bring them onto more similar scales.
+
+**To see the influence of the sequencing depth normalization, make two box plots of log2(read counts) - one for unnormalized counts, the other one for normalized counts (exclude genes with zero reads in all samples).**
+
+```{r logReadCountTables}
+# non-normalized read counts plus pseudocount
+log.counts <- log2(counts(DESeq.ds, normalized = FALSE) + 1)
+# normalized read counts
+log.norm.counts <- log2(counts(DESeq.ds, normalized=TRUE) + 1)
+```
+
+```{r boxplots_logReadCounts, fig.width = 10, fig.height = 15}
+par(mfrow=c(2,1)) # to plot the two box plots underneath each other
+boxplot(log.counts, notch=TRUE,
+        main = "Non-normalized read counts\n(log-transformed)",
+        ylab="read counts")
+boxplot(log.norm.counts, notch=TRUE,
+        main = "Size-factor-normalized read counts\n(log-transformed)",
+        ylab="read counts") 
+```
+
+**Make a scatterplot of log normalized counts against each other to see how well the actual values correlate which each other per sample and gene**
+
+```{r scatterplots_logNormReadCounts, fig.width = 10, fig.height = 15}
+library(vsn)
+
+par(mfrow=c(2,1)) 
+plot(log.norm.counts[, c("WT_1","WT_2")], cex=.1,
+     main = "WT_1 vs. WT_2")
+plot(log.norm.counts[,c("SNF2_1","SNF2_2")], cex=.1,
+     main = "SNF2_1 vs SNF2_2")
+```
+
+Every dot = one gene.
+
+The fanning out of the points in the lower left corner (points below $2^5 = 32$) indicates that read counts correlate less well between replicates when they are low.
+
+```{r scatterplots_logNormReadCounts_allSamples, fig.width = 10, fig.height = 10}
+# comparing all samples per condition at once
+pairs(log.norm.counts[,c(paste("WT",c(1:5),sep="_"))])
+pairs(log.norm.counts[,c(paste("SNF2",c(1:5),sep="_"))])
+```
+
+The scattering of the points for fewer than 32 reads indicates that the standard deviation of the fold changes may depend on the mean: the lower the mean read counts per gene, the higher the standard deviation.
+This can be assessed visually; the package `vsn` offers a simple function for this.
+
+```{r vsn}
+#source("http://bioconductor.org/biocLite.R")
+#biocLite("vsn")
+library(vsn)
+par(mfrow=c(1,1))
+# sequencing depth normalized log2(read counts)
+msd_plot <- meanSdPlot(log.norm.counts, 
+                       ranks=FALSE, # show the data on the original scale
+                       plot = FALSE)
+library(ggplot2)
+msd_plot$gg + 
+  ggtitle("sequencing depth normalized log2(read counts)") +
+  ylab("standard deviation") 
+```
+
+```{r}
+save.image(file = paste0(folder, "featureCountExploration.RDat"))
+```
+
+
+From the help for`meanSdPlot`: *The red dots depict the running median estimator (window-width 10 percent). If there is no variance-mean dependence, then the line formed by the red dots should be approximately horizontal.*
+
+The plot here shows that there is some variance-mean dependence for genes with low read counts.
+This means that the data shows signs of _heteroskedasticity_.
+
+__Friday, August 26__
+
+```{r}
+load("featureCountExploration.RDat")
+library(DESeq2)
+library(vsn)
+```
+
+Many tools expect data to be _homoskedastic_, i.e., all variables should have similar variances.
+
+DESeq offers two ways to shrink the log-transformed counts for genes with very low counts: `rlog` and `varianceStabilizingTransformation`.
+
+We'll use `rlog` here as it is an optimized method for RNA-seq read counts:
+it transforms the read counts to the log2 scale while simultaneously minimizing the difference between samples for rows with small counts and taking differences between library sizes of the samples into account.
+`vst` tends to depend a bit more on the size factors, but generally, both methods should return similar results.
+
+```{r VarianceStabilization, fig.width = 15, fig.height = 8}
+DESeq.rlog <- rlog(DESeq.ds, blind = TRUE) # set blind = FALSE if the 
+# conditions are expected to introduce strong differences in a large proportion of the genes
+```
+
+
+```{r rlog_vs_log2, fig.width = 15, fig.height = 8}
+par(mfrow=c(1,2)) 
+plot(log.norm.counts[,1:2], cex=.1,
+     main = "size factor and log2-transformed")
+
+# the rlog-transformed counts are stored in the accessor "assay"
+plot(assay(DESeq.rlog)[,1],
+     assay(DESeq.rlog)[,2],
+     cex=.1, main = "rlog transformed",
+     xlab = colnames(assay(DESeq.rlog[,1])),
+     ylab = colnames(assay(DESeq.rlog[,2])) )
+rlog.norm.counts <- assay(DESeq.rlog)
+```
+
+As you can see in the left plot the variance - that is higher for small read counts - is tightened significantly using `rlog`.
+What does the mean-sd-plot show?
+
+```{r meanSdPlots, fig.width = 15, fig.height = 8}
+library(ggplot2)
+# sequencing depth normalized log2(read counts)
+msd_plot <- meanSdPlot(log.norm.counts, ranks=FALSE, plot = FALSE)
+msd_plot$gg + ggtitle("Normal log transformation")
+
+# rlog-transformed read counts
+msd_plot <- meanSdPlot( rlog.norm.counts, ranks=FALSE, plot = FALSE)
+msd_plot$gg + ggtitle("rlog transformation")
+```
+
+```{r, echo=TRUE, eval = FALSE}
+save.image(file = "featureCountExploration.RDat")
+```
+
+
+```{r}
+#source("https://bioconductor.org/biocLite.R")
+#biocLite("pcaExplorer")
+library(pcaExplorer)
+pcaExplorer(dds = DESeq.ds, rlt = DESeq.rlog)
+```
+

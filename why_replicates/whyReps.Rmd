@@ -1,0 +1,59 @@
+---
+title: "Why replicates?"
+author: "Friederike Duendar"
+date: "August 15, 2017"
+output:
+  html_document:
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(ggplot2)
+theme_set( theme_bw(base_size = 16) )
+```
+
+
+Define test data -- 200 sample points from the same (!) distribution
+
+```{r eval=FALSE, echo = TRUE}
+testdat <- data.frame(exprs = rnorm(200),
+                      condition = c("WT","MUT"),
+                      gene_name = "Rando1A")
+```
+
+1 measurement per condition:
+
+```{r, fig.height = 3, fig.width = 3}
+ggplot(testdat[c(1,200),],
+       aes(x = condition, y = exprs, color = condition)) +
+  geom_point(size = 3, alpha = .8) +
+  coord_cartesian(ylim = c( min(testdat$exprs), max(testdat$exprs)) ) +
+  guides(color = FALSE) + xlab("") +
+  facet_wrap(~gene_name)
+```
+
+2 measurements per condition:
+
+```{r  fig.height = 3, fig.width = 3}
+ggplot(testdat[c(1,10,21,100),],
+       aes(x = condition, y = exprs, color = condition)) +
+  geom_jitter(size = 3, alpha = .6) +
+  coord_cartesian(ylim = c( min(testdat$exprs), max(testdat$exprs)) ) +
+  guides(color = FALSE) + xlab("") +
+    facet_wrap(~gene_name)
+```
+
+All measurements:
+
+```{r  fig.height = 3, fig.width = 3}
+ggplot(testdat,
+       aes(x = condition, y = exprs, color = condition)) +
+  geom_jitter(size = 2, alpha = .4) +
+  coord_cartesian(ylim = c( min(testdat$exprs), max(testdat$exprs)) ) +
+  geom_boxplot(alpha = .2, notch = TRUE) +
+  guides(color = FALSE) + xlab("") +
+  facet_wrap(~gene_name)
+
+```
+

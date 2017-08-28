@@ -1,0 +1,151 @@
+---
+title: "Read counts to DGE, Part II"
+output: pdf_document
+---
+
+Here, we will show you how to:
+
+* plot correlations of replicates
+* do PCA
+* make a dendrogram
+
+We assume that Part I has already been run. 
+
+```{r setWD}
+folder <- "~/Documents/Teaching/2017_RNA-seq/"
+setwd(folder)
+```
+```{r settingUp, warning=FALSE, echo=TRUE, message=FALSE}
+library(knitr)
+opts_chunk$set(echo = FALSE, message = FALSE,cache=FALSE)
+library(DESeq2)
+library(ggplot2)
+load("featureCountExploration.RDat")
+```
+
+## Correlation plots
+
+The ENCODE consortium recommends that _"for messenger RNA, (...) biological replicates [should] display greater than 0.9 correlation for transcripts/features"_.
+
+The Pearson correlation coefficient is a measure of the strength of the linear relationship between two variables and is often used to assess the similarity of RNA-seq samples in a pair-wise fashion.
+It is defined as the **covariance of two variables divided by the product of their standard deviation**.
+
+```{r correlation}
+# to plot the correlation with the pairs() function, we need to define
+# a function that will calculate the correlation and print it as text
+# (code is in fact taken from the help text of ?pairs() )
+panel.cor <- function(x, y, digits = 2, prefix = "", cex.cor, ...)
+{
+    usr <- par("usr"); on.exit(par(usr))
+    par(usr = c(0, 1, 0, 1))
+    
+    # define the type of correlation
+    corr_coeff <- cor(x, y, method = "pearson") 
+    
+    txt <- format(c(corr_coeff, 0.123456789), digits = digits)[1]
+    txt <- paste0(prefix, txt)
+    if(missing(cex.cor)) cex.cor <- 0.8/strwidth(txt)
+    text(0.5, 0.5, txt, cex = cex.cor * abs(corr_coeff))
+}
+
+# let's make the plots
+pairs(log.norm.counts[,c(paste("WT",c(1:5),sep="_"))], lower.panel = panel.smooth, upper.panel = panel.cor)
+
+pairs(log.norm.counts[,c(paste("SNF2",c(1:5),sep="_"))], lower.panel = panel.smooth, upper.panel = panel.cor)
+```
+
+## Hierarchical clustering
+
+Hierarchical clustering requires two decisions: 
+
+1. How should the (dis)similarity between pairs be calculated? [distance]
+2. How should the (dis)similarity be used for the clustering? [linkage]
+
+Let's start with a dendrogram determined by hierarchical clustering of a Pearson correlation distance matrix:
+
+```{r fig.width=10, fig.height=5}
+# cor() calculates the correlation between columns of a matrix
+distance.m <- as.dist(1 - cor(log.norm.counts, method = "pearson"))
+plot(hclust(distance.m), labels = colnames(log.norm.counts), main = "seq.depth and log2 transformed read counts\ndistance: Pearson correlation")
+
+distance.m_rlog <- as.dist(1 - cor(assay(rlog.DESeq.sumExp), method = "pearson" ))
+plot(hclust(distance.m_rlog), labels = colnames(log.norm.counts), main = "rlog transformed read counts\ndistance: Pearson correlation")
+```
+
+Which linkage method was used?
+
+The most popular choices for the \textit{linkage function} are:
+
+* _complete_: intercluster distance = largest distance between any 2 members of either cluster
+* _average_: intercluster distance = average distance between any 2 members
+* _single_:  intercluster distance = shortest distance between any 2 members
+
+_complete_ often performs best.
+
+Can you make a dendrogram with Euclidean distance and linkage method "average"?
+
+```{r echo=FALSE, eval=TRUE}
+# dist() computes the distances between the _rows_ of a data matrix
+plot(hclust( dist( t(log.norm.counts), method = "euclidean"), method = "average"),
+  labels=colnames(log.norm.counts),
+  main = "seq.depth and log2 transformed read counts")
+
+plot(hclust( dist( t(assay(rlog.DESeq.sumExp)), method = "euclidean"), method="average"),
+     labels=row.names(colData(rlog.DESeq.sumExp)),
+     main = "rlog transformed read counts")
+```
+
+
+## Principal Components Analysis
+
+The principal components (PCA) plot is a useful diagnostic for examining relationships between samples. 
+Principal components represent the directions along which the variation in the data is maximal, so that a few dimensions can be used to represent the information from thousands of mRNAs per sample.
+More details can be found in the main text; here we will focus on the `R` code needed to do a PCA on normalized and transformed read count data.
+
+PCA is performed using the function `prcomp`.
+
+```{r}
+pc <- prcomp(t(rlog.norm.counts))
+str(pc)
+head(pc$x)
+
+plot(pc$x[,1], pc$x[,2], 
+     col = colData(DESeq.ds)[,1], pch = as.integer(colData(DESeq.ds)[,1]),
+     main = "PCA of seq.depth normalized and log2 transformed read counts")
+
+# add legend
+legend("bottomleft", pch = unique(as.integer(colData(DESeq.ds)[,1])), legend = unique(colData(DESeq.ds)[,1]) )
+```
+
+How could you focus the PCA on 1,000 genes that have the greatest variability between the samples? Hint: `var()` can be used to calculate the variation for a vector.
+
+```{r echo=FALSE, eval=TRUE}
+# gene-wise variation (= variation per row)
+variation.readcounts <- apply(rlog.norm.counts, 1, FUN = "var")
+# get top 1000 row indeces
+topgenes <- head(order(variation.readcounts, decreasing=TRUE), 1000)
+# use the indeces
+pc <- prcomp(t(rlog.norm.counts[topgenes,]))
+```
+
+`DESeq2` provides a convenient function for PCA of `DESeqDataSets`.
+
+```{r PCA_DESeq2}
+print(plotPCA(DESeqTransform(DESeq.ds), ntop = 500) + 
+        theme_bw() + ggtitle("Raw counts"))
+
+print( plotPCA(rlog.DESeq.sumExp) + theme_bw() + ggtitle("Rlog transformed counts"))
+```
+
+Even more convenient and comprehensive: `pcaExplorer`, an R application with numerous functionalities.
+
+```{r eval = FALSE}
+#source("https://bioconductor.org/biocLite.R")
+#biocLite("pcaExplorer")
+library(pcaExplorer)
+pcaExplorer(dds = DESeq.ds, rlt = DESeq.rlog)
+```
+
+```{r, echo=FALSE}
+save.image(file = "ReadCountsToDGE.RData")
+```
